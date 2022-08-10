@@ -1,22 +1,15 @@
 // SPDX-License-Identifier: WTFPL
-use regex::bytes::Regex as BytesRegex;
-use std::fs::{self};
-use std::io;
-use std::os::unix::prelude::*;
-
-mod core;
-
 use self::core::Core;
 use crate::group::Group;
 use crate::source::Source;
+use std::{fs, io, os::unix::prelude::*};
 
-#[derive(Debug)]
-struct Cores(Vec<Core>);
+mod core;
 
 pub fn cores() -> Result<Group, io::Error> {
     let mut cores = Vec::new();
     let mut idx = 0;
-    let policy_rx = BytesRegex::new(r"policy(\d+)$").unwrap();
+    let policy_rx = regex::bytes::Regex::new(r"policy(\d+)$").unwrap();
     for dent in fs::read_dir("/sys/devices/system/cpu/cpufreq")? {
         let dent = dent?;
         if policy_rx.is_match(dent.file_name().as_bytes()) {

@@ -8,12 +8,6 @@ use std::{
     str::{FromStr, Utf8Error},
 };
 
-pub trait Source: Send {
-    fn read(&self) -> Option<f32>;
-    fn unit(&self) -> &str;
-    fn name(&self) -> &str;
-}
-
 #[derive(Debug)]
 pub enum ReadIntoErrorKind<F>
 where
@@ -28,9 +22,9 @@ where
 pub struct ReadIntoError<F: FromStr>
 where
     F: FromStr,
-    F::Err: Debug, // F::Err: std::error::Error,
+    F::Err: Debug,
 {
-    path: Option<PathBuf>,
+    path: PathBuf,
     kind: ReadIntoErrorKind<F>,
 }
 
@@ -39,9 +33,9 @@ where
     F: FromStr,
     F::Err: Debug,
 {
-    fn new<P: AsRef<Path>>(path: Option<P>, kind: ReadIntoErrorKind<F>) -> ReadIntoError<F> {
+    fn new(path: &Path, kind: ReadIntoErrorKind<F>) -> ReadIntoError<F> {
         ReadIntoError {
-            path: path.map(|p| p.as_ref().to_owned()),
+            path: path.to_owned(),
             kind,
         }
     }
@@ -54,10 +48,7 @@ where
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         use ReadIntoErrorKind::*;
         match &self.kind {
-            Io(e) => match &self.path {
-                None => write!(f, "couldn't read file: {}", e),
-                Some(p) => write!(f, "couldn't read {:?}: {}", p, e),
-            },
+            Io(e) => write!(f, "couldn't read {:?}: {}", self.path, e),
             Utf8(e, b) => write!(f, "non-utf8 output b\"{:?}\": {}", b, e),
             Parse(e, s) => write!(f, "unexpected output \"{}\": {}", s, e),
         }
@@ -71,12 +62,11 @@ where
 {
 }
 
-pub fn read_into<I, P>(f: &File, p: Option<P>) -> Result<I, ReadIntoError<I>>
+pub fn read_into<I>(f: &File, p: &Path) -> Result<I, ReadIntoError<I>>
 where
     File: FileExt,
     I: FromStr,
     I::Err: Debug,
-    P: AsRef<Path>,
 {
     let mut buf: [u8; 16] = [0; 16];
     if let Err(e) = f.read_at(&mut buf, 0) {

@@ -1,35 +1,32 @@
 // SPDX-License-Identifier: WTFPL
+use super::{sensor_type::SensorType, BAD_PATH};
+use crate::source::{read_into, Input, Source};
 use once_cell::sync::Lazy;
-use regex::bytes::Regex as BytesRegex;
+use std::{
+    cell::Cell,
+    fs::{self, File},
+    io,
+    os::unix::prelude::*,
+    path::{Path, PathBuf},
+};
 
-use std::fs::{self, File};
-use std::io;
-use std::os::unix::ffi::OsStrExt;
-
-use std::path::{Path, PathBuf};
-
-use super::sensor_type::SensorType;
-use crate::fuse::Fuse;
-use crate::source::{read_into, Source};
+static NAME_RX: Lazy<regex::bytes::Regex> =
+    Lazy::new(|| regex::bytes::Regex::new(r"(.+)(\d+)_(.+)").expect("malformed regex"));
 
 #[derive(Debug)]
 pub struct Sensor {
     input: File,
     label: String,
     typ: SensorType,
-    path: PathBuf,
-    fail: Fuse,
+    pub path: PathBuf,
+    fail: Cell<bool>,
 }
-
-static NAME_RX: Lazy<BytesRegex> =
-    Lazy::new(|| BytesRegex::new(r"(.+)(\d+)_").expect("malformed regex"));
 
 impl Sensor {
     fn new(path: &Path) -> Result<Sensor, io::Error> {
-        let name = path.file_name().expect("bad path from Module::new");
-        let caps = NAME_RX
-            .captures(name.as_bytes())
-            .expect("bad path from Module::new");
+        // assert that super::modules passed correct path
+        let name = path.file_name().expect(BAD_PATH);
+        let caps = NAME_RX.captures(name.as_bytes()).expect(BAD_PATH);
         let input = File::open(&path)?;
         // fairly certain that `name` is valid ascii/utf8 because we already passed the regex
         let typ = unsafe { std::str::from_utf8_unchecked(&caps[1]) };
@@ -57,24 +54,24 @@ impl Sensor {
             typ: SensorType::from_str(typ),
             label,
             path: path.to_owned(),
-            fail: Fuse::new(),
+            fail: Cell::new(false),
         })
     }
 }
 
-impl Source for Sensor {
+impl Input for Sensor {
     fn read(&self) -> Option<f32> {
-        if self.fail.blown() {
+        if self.fail.get() {
             return None;
         }
 
-        match read_into::<i32, _>(&self.input, Some(self.path.as_path())) {
+        match read_into::<i32>(&self.input, self.path.as_path()) {
             Ok(v) => Some(match self.typ {
                 SensorType::Fan => v as f32,
                 _ => v as f32 / 1000.0,
             }),
             Err(e) => {
-                self.fail.blow();
+                self.fail.set(true);
                 eprintln!("{}", e);
                 None
             }
@@ -90,16 +87,16 @@ impl Source for Sensor {
     }
 }
 
-pub fn sensors<P: AsRef<Path>>(path: P) -> Result<Vec<Box<dyn Source>>, io::Error> {
+pub fn sensors(path: &Path) -> Result<Vec<Source>, io::Error> {
     let mut sensors = Vec::new();
-    let name_rx = BytesRegex::new(r"(.+)(\d+)_input$").expect("malformed regex");
-    for dent in fs::read_dir(&path)? {
+    for dent in fs::read_dir(path)? {
         let dent = dent?;
-        if !name_rx.is_match(dent.file_name().as_bytes()) {
-            continue;
-        };
-        sensors.push(Box::new(Sensor::new(&dent.path())?) as Box<dyn Source>);
+        if let Some(caps) = NAME_RX.captures(dent.file_name().as_bytes()) {
+            if caps[3].eq(b"input") {
+                sensors.push(Box::new(Sensor::new(&dent.path())?));
+            }
+        }
     }
-    sensors.sort_by(|l, r| l.name().cmp(r.name()));
-    Ok(sensors)
+    sensors.sort_by(|l, r| l.path.file_name().cmp(&r.path.file_name()));
+    Ok(sensors.into_iter().map(Source::new).collect())
 }

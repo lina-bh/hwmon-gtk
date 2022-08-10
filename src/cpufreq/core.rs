@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: WTFPL
-
 use std::fs::File;
 use std::io;
 use std::os::unix::prelude::FileExt;

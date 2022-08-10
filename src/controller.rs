@@ -1,143 +1,87 @@
 // SPDX-License-Identifier: WTFPL
+use crate::source::Input;
+use crate::update::{self, DeviceMap};
+use crate::{device::Device, update::Update};
 use glib::{MainContext, Sender};
 use gtk::{prelude::*, CellRendererText, TreeIter, TreeStore, TreeView, TreeViewColumn};
-
-use std::rc::Rc;
-use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::Duration;
-
-use crate::group::Group;
-use crate::source::Source;
+use std::{
+    collections::HashMap,
+    hash::Hash,
+    rc::Rc,
+    sync::{Arc, Mutex},
+    thread,
+    time::Duration,
+};
 
 const COLUMNS: &[(&str, glib::Type)] =
     &[("Name", glib::Type::STRING), ("Value", glib::Type::STRING)];
 
-pub struct ControllerBuilder {
-    groups: Vec<Group>,
-}
-
-impl ControllerBuilder {
-    pub fn new() -> Self {
-        Self { groups: Vec::new() }
-    }
-
-    pub fn group(mut self, mut group: Vec<Group>) -> Self {
-        self.groups.append(&mut group);
-        self
-    }
-
-    pub fn build(self) -> Rc<Controller> {
-        Controller::new(self.groups)
-    }
-}
-
-struct SourceData {
-    pub source: Box<dyn Source>,
-    pub cur: f32,
-    pub min: f32,
-    pub max: f32,
-    pub err: bool,
-}
-
 pub struct Controller {
     pub view: TreeView,
     model: TreeStore,
-    rows: Vec<TreeIter>,
-    data: Arc<Mutex<Vec<SourceData>>>,
-    tx: Sender<()>,
+    devices_rows: HashMap<String, (TreeIter, HashMap<String, TreeIter>)>,
+    data: Arc<Mutex<DeviceMap>>,
 }
 
 impl Controller {
-    fn new(groups: Vec<Group>) -> Rc<Self> {
-        let store = TreeStore::new(&COLUMNS.iter().map(|c| c.1).collect::<Vec<glib::Type>>());
+    fn new(rx: glib::Receiver<Update>, data: Arc<Mutex<DeviceMap>>) -> Rc<Self> {
+        let model = TreeStore::new(&COLUMNS.iter().map(|c| c.1).collect::<Vec<glib::Type>>());
         let view = gtk::TreeView::builder()
             .headers_visible(true)
-            .model(&store)
+            .model(&model)
             .build();
         for (i, (name, _)) in COLUMNS.iter().enumerate() {
             add_column(&view, name, i as i32);
         }
-        let (tx, rx) = MainContext::channel::<()>(glib::PRIORITY_DEFAULT);
-        let mut ctrl = Self {
+        let ctrl = Self {
             view,
-            model: store,
-            rows: Vec::new(),
-            tx,
-            data: Arc::new(Mutex::new(Vec::new())),
+            model,
+            devices_rows: HashMap::new(),
+            data,
         };
-        for group in groups {
-            ctrl.insert_group(group);
-        }
+
         let ctrl_rc = Rc::new(ctrl);
         let rx_rc = ctrl_rc.clone();
-        rx.attach(None, move |()| {
-            rx_rc.update_model();
+        rx.attach(None, move |msg| {
+            match msg {
+                Created | Tick => {}
+            };
             glib::Continue(true)
         });
         ctrl_rc.start();
         ctrl_rc
     }
 
-    fn insert_group(&mut self, group: Group) {
+    fn insert_group(&mut self, group: &Device) {
         let mut data = self.data.lock().unwrap();
         let group_row = self
             .model
             .insert_with_values(None, None, &[(0, &group.name.to_value())]);
+        let rows_map = HashMap::new();
         for source in group.sources.into_iter() {
             let iter = self.model.insert(Some(&group_row), -1);
-            self.model.set_value(&iter, 0, &source.name().to_value());
-            self.rows.push(iter);
-            data.push(SourceData {
-                source,
-                cur: 0.,
-                min: 0.,
-                max: 0.,
-                err: false,
-            });
+            rows_map.insert(source.input.name().to_string(), iter);
         }
+        self.devices_rows
+            .insert(group.name.clone(), (group_row, rows_map));
     }
 
-    fn start(&self) {
-        self.view.expand_all();
-        let data = self.data.clone();
-        let sender = self.tx.clone();
-        thread::spawn(move || loop {
-            if let Ok(mut data) = data.lock() {
-                update_data(&mut data);
-            } else {
-                // we panicked
-                return;
+    fn update_model(&self, data: &DeviceMap) {
+        for dev in data.values() {
+            let (device_row, source_rows) = match self.devices_rows.get(&dev.name) {
+                None => {
+                    let iter =
+                        self.model
+                            .insert_with_values(None, None, &[(0, &dev.name.to_value())]);
+                    let val = (iter, HashMap::new());
+                    self.devices_rows.insert(dev.name.clone(), val);
+                    &val
+                }
+                Some(t) => t,
+            };
+            for source in dev.sources.iter() {
+                let source_row = source_rows.get(&source.input.name());
             }
-            if sender.send(()).is_err() {
-                return;
-            }
-            thread::sleep(Duration::from_secs(2));
-        });
-    }
-
-    fn update_model(&self) {
-        let data = self.data.lock().unwrap();
-        for (i, s) in data.iter().enumerate() {
-            let row = self.rows.get(i).unwrap();
-            let fmt = format!("{}{}", s.cur, s.source.unit());
-            self.model.set_value(row, 1, &fmt.to_value());
-        }
-    }
-}
-
-fn update_data(data: &mut Vec<SourceData>) {
-    for s in data.iter_mut() {
-        if let Some(v) = s.source.read() {
-            s.cur = v;
-            if s.min > v {
-                s.min = v;
-            }
-            if s.max < v {
-                s.max = v;
-            }
-        } else {
-            s.err = true;
         }
     }
 }
